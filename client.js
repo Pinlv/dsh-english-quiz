@@ -1182,6 +1182,111 @@ window.__ModuleLoader__.load({
       }).join('')
     }
 
+    function levenshteinDistance(left, right) {
+      const a = Array.from(typeof left === 'string' ? left : '')
+      const b = Array.from(typeof right === 'string' ? right : '')
+      let previous = new Uint16Array(b.length + 1)
+      for (let index = 0; index <= b.length; index += 1) previous[index] = index
+      for (let i = 1; i <= a.length; i += 1) {
+        const current = new Uint16Array(b.length + 1)
+        current[0] = i
+        for (let j = 1; j <= b.length; j += 1) {
+          const cost = a[i - 1] === b[j - 1] ? 0 : 1
+          current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost)
+        }
+        previous = current
+      }
+      return previous[b.length]
+    }
+
+    function closestExpected(given, expected) {
+      const value = typeof given === 'string' ? given : ''
+      const list = Array.isArray(expected)
+        ? expected.filter((answer) => typeof answer === 'string' && answer !== '')
+        : []
+      if (list.length === 0) return ''
+      let best = list[0]
+      let bestScore = levenshteinDistance(value, best)
+      for (let index = 1; index < list.length; index += 1) {
+        const score = levenshteinDistance(value, list[index])
+        if (score < bestScore) {
+          best = list[index]
+          bestScore = score
+        }
+      }
+      return best
+    }
+
+    function diffChars(left, right) {
+      const a = Array.from(typeof left === 'string' ? left : '')
+      const b = Array.from(typeof right === 'string' ? right : '')
+      const rows = a.length + 1
+      const columns = b.length + 1
+      const lcs = Array.from({ length: rows }, () => new Uint16Array(columns))
+      for (let i = a.length - 1; i >= 0; i -= 1) {
+        for (let j = b.length - 1; j >= 0; j -= 1) {
+          lcs[i][j] = a[i] === b[j]
+            ? lcs[i + 1][j + 1] + 1
+            : Math.max(lcs[i + 1][j], lcs[i][j + 1])
+        }
+      }
+      const user = []
+      const correct = []
+      const append = (list, type, char) => {
+        if (char === '') return
+        const last = list[list.length - 1]
+        if (last !== undefined && last.type === type) last.text += char
+        else list.push({ type, text: char })
+      }
+      let i = 0
+      let j = 0
+      while (i < a.length && j < b.length) {
+        if (a[i] === b[j]) {
+          append(user, 'equal', a[i])
+          append(correct, 'equal', b[j])
+          i += 1
+          j += 1
+        } else if (lcs[i + 1][j] > lcs[i][j + 1]) {
+          append(user, 'del', a[i])
+          i += 1
+        } else {
+          append(correct, 'ins', b[j])
+          j += 1
+        }
+      }
+      while (i < a.length) {
+        append(user, 'del', a[i])
+        i += 1
+      }
+      while (j < b.length) {
+        append(correct, 'ins', b[j])
+        j += 1
+      }
+      return { user, correct }
+    }
+
+    function DiffMarks({ segments, side }) {
+      const markClass = side === 'user' ? 'eqz-diff-del' : 'eqz-diff-ins'
+      const shouldMark = (segment) => (side === 'user' ? segment.type === 'del' : segment.type === 'ins')
+      return h(
+        Fragment,
+        null,
+        (Array.isArray(segments) ? segments : []).map((segment, segmentIndex) => {
+          if (!shouldMark(segment)) {
+            return h(Fragment, { key: segmentIndex }, segment.text)
+          }
+          const parts = segment.text.split(/(\s+)/)
+          return h(
+            Fragment,
+            { key: segmentIndex },
+            parts.map((part, partIndex) => (/\s/.test(part)
+              ? h(Fragment, { key: partIndex }, part)
+              : h('span', { key: partIndex, className: markClass }, part))),
+          )
+        }),
+      )
+    }
+
     function countWords(text) {
       const matches = String(text).match(/[A-Za-z][A-Za-z'’-]*/g)
       return matches === null ? 0 : matches.length
@@ -1490,7 +1595,11 @@ window.__ModuleLoader__.load({
               const row = byItem.get(item.id)
               if (item.kind === 'translate') {
                 const ok = row?.ok === true
-                const reference = Array.isArray(row?.expected) ? row.expected[0] ?? '' : ''
+                const given = typeof row?.given === 'string' ? row.given : ''
+                const expected = Array.isArray(row?.expected) ? row.expected : []
+                const reference = closestExpected(given, expected)
+                const diff = diffChars(given, reference)
+                const showDiff = !ok && given.trim() !== '' && reference !== ''
                 return h(
                   'div',
                   { key: item.id, className: 'eqz-item' },
@@ -1504,16 +1613,34 @@ window.__ModuleLoader__.load({
                   h('div', { className: 'eqz-label' }, '你的答案'),
                   h(
                     'div',
-                    { className: ok ? 'eqz-answer eqz-verdict-ok' : 'eqz-answer eqz-verdict-bad' },
-                    row?.given === undefined || row.given === '' ? '—' : row.given,
+                    {
+                      className: ok
+                        ? 'eqz-answer eqz-verdict-ok'
+                        : showDiff
+                          ? 'eqz-answer'
+                          : 'eqz-answer eqz-verdict-bad',
+                    },
+                    given.trim() === ''
+                      ? '未作答'
+                      : showDiff
+                        ? h(DiffMarks, { segments: diff.user, side: 'user' })
+                        : given,
                   ),
                   ok
                     ? null
                     : h(
                       Fragment,
                       null,
-                      h('div', { className: 'eqz-label' }, '参考答案'),
-                      h('div', { className: 'eqz-answer eqz-reference' }, reference),
+                      h('div', { className: 'eqz-label' }, '正确答案'),
+                      h(
+                        'div',
+                        { className: 'eqz-answer eqz-reference' },
+                        reference === ''
+                          ? '暂无'
+                          : showDiff
+                            ? h(DiffMarks, { segments: diff.correct, side: 'correct' })
+                            : reference,
+                      ),
                     ),
                   typeof row?.note === 'string' && row.note !== ''
                     ? h('div', { className: 'eqz-note-line' }, row.note)
@@ -1556,14 +1683,45 @@ window.__ModuleLoader__.load({
                     : h(SpeakerButton, { text: correctText(item, row), label: '朗读正确句子' }),
                 ),
                 item.translation ? h('div', { className: 'eqz-trans' }, item.translation) : null,
-                wrongHere.map((blank) =>
-                  h(
+                wrongHere.map((blank) => {
+                  const given = typeof blank.given === 'string' ? blank.given : ''
+                  const expected = Array.isArray(blank.expected) ? blank.expected : []
+                  const reference = closestExpected(given, expected)
+                  const diff = diffChars(given, reference)
+                  const showDiff = given.trim() !== '' && reference !== ''
+                  return h(
                     'div',
-                    { key: `w${blank.blank}`, className: blank.spelling ? 'eqz-wrong eqz-spell' : 'eqz-wrong' },
-                    `${blank.spelling ? '拼写 · ' : ''}${t('review.yours', '你填')}「${blank.given === '' ? t('review.skipped', '未作答') : blank.given}」`,
-                    ` · ${t('review.expected', '应为')}「${(blank.expected ?? [])[0] ?? ''}」`,
-                  ),
-                ),
+                    { key: `w${blank.blank}`, className: 'eqz-diff-block' },
+                    h(
+                      'div',
+                      { className: 'eqz-diff-row' },
+                      h('span', { className: 'eqz-diff-label' }, blank.spelling ? '拼写' : '你填'),
+                      h(
+                        'span',
+                        { className: 'eqz-diff-text' },
+                        given.trim() === ''
+                          ? t('review.skipped', '未作答')
+                          : showDiff
+                            ? h(DiffMarks, { segments: diff.user, side: 'user' })
+                            : given,
+                      ),
+                    ),
+                    h(
+                      'div',
+                      { className: 'eqz-diff-row' },
+                      h('span', { className: 'eqz-diff-label' }, '正确答案'),
+                      h(
+                        'span',
+                        { className: 'eqz-diff-text' },
+                        reference === ''
+                          ? '暂无'
+                          : showDiff
+                            ? h(DiffMarks, { segments: diff.correct, side: 'correct' })
+                            : reference,
+                      ),
+                    ),
+                  )
+                }),
                 wrongHere.length > 0 && item.note ? h('div', { className: 'eqz-note' }, item.note) : null,
               )
             }),
@@ -1916,9 +2074,11 @@ window.__ModuleLoader__.load({
       const result = matched.result
       const given = typeof result?.given === 'string' ? result.given : ''
       const expected = Array.isArray(result?.expected) ? result.expected : []
-      const reference = expected[0] ?? ''
+      const reference = closestExpected(given, expected)
       const ok = result?.ok === true
-      const alternatives = expected.slice(1)
+      const diff = diffChars(given, reference)
+      const showDiff = !ok && given.trim() !== '' && reference !== ''
+      const alternatives = expected.filter((answer) => answer !== reference)
 
       useEffect(() => () => stopSpeaking(), [])
 
@@ -1950,16 +2110,34 @@ window.__ModuleLoader__.load({
             h('div', { className: 'eqz-label' }, '你的答案'),
             h(
               'div',
-              { className: ok ? 'eqz-answer eqz-verdict-ok' : 'eqz-answer eqz-verdict-bad' },
-              given === '' ? '—' : given,
+              {
+                className: ok
+                  ? 'eqz-answer eqz-verdict-ok'
+                  : showDiff
+                    ? 'eqz-answer'
+                    : 'eqz-answer eqz-verdict-bad',
+              },
+              given.trim() === ''
+                ? '未作答'
+                : showDiff
+                  ? h(DiffMarks, { segments: diff.user, side: 'user' })
+                  : given,
             ),
             ok
               ? null
               : h(
                 Fragment,
                 null,
-                h('div', { className: 'eqz-label' }, '参考答案'),
-                h('div', { className: 'eqz-answer eqz-reference' }, reference),
+                h('div', { className: 'eqz-label' }, '正确答案'),
+                h(
+                  'div',
+                  { className: 'eqz-answer eqz-reference' },
+                  reference === ''
+                    ? '暂无'
+                    : showDiff
+                      ? h(DiffMarks, { segments: diff.correct, side: 'correct' })
+                      : reference,
+                ),
                 alternatives.length > 0
                   ? h('div', { className: 'eqz-note-line' }, `也可接受：${alternatives.join('；')}`)
                   : null,
@@ -2028,6 +2206,12 @@ window.__ModuleLoader__.load({
 .eqz-translate-inline{height:auto;min-height:38px;font-size:14px;margin-top:2px}
 .eqz-label{color:var(--dsw-alias-label-secondary);font-size:12px;margin-top:2px}
 .eqz-reference{color:var(--dsw-alias-state-success-primary)}
+.eqz-diff-block{display:flex;flex-direction:column;gap:4px;margin-top:6px;padding-left:26px}
+.eqz-diff-row{display:flex;align-items:baseline;gap:8px;min-width:0;font-size:12px;line-height:1.6}
+.eqz-diff-label{flex:none;min-width:44px;color:var(--dsw-alias-label-secondary);font-size:11px}
+.eqz-diff-text{min-width:0;color:var(--dsw-alias-label-primary);white-space:pre-wrap;overflow-wrap:break-word}
+.eqz-diff-del{color:var(--dsw-alias-state-error-primary);text-decoration:line-through}
+.eqz-diff-ins{color:var(--dsw-alias-state-error-primary);font-weight:600}
 .eqz-verdict-ok{color:var(--dsw-alias-state-success-primary);font-weight:600}
 .eqz-verdict-bad{color:var(--dsw-alias-state-error-primary);font-weight:600}
 .eqz-note-line{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.6}
